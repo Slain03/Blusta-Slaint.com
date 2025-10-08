@@ -1,0 +1,93 @@
+// frontend/components/WalletSwapSLN.js
+"use client";
+import { useState } from "react";
+import { useAccount } from "wagmi";
+import { ethers } from "ethers";
+
+const SLN_ADDRESS = "0x5c047Dbf4D8C70d245732B9fda4653635EBa1858";
+const BSC_CHAIN_ID = 56;
+
+export default function WalletSwapSLN() {
+  const { address, isConnected } = useAccount();
+  const [fromToken, setFromToken] = useState("BNB");
+  const [toToken, setToToken] = useState("SLN");
+  const [amount, setAmount] = useState("");
+  const [txHash, setTxHash] = useState(null);
+
+  const handleSwap = async () => {
+    if (!isConnected) return alert("Connect your wallet first.");
+    if (!amount) return alert("Enter amount to swap.");
+
+    try {
+      const provider = new ethers.BrowserProvider(window.ethereum);
+      const signer = await provider.getSigner();
+      const fromTokenAddress = fromToken === "BNB" ? "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE" : fromToken;
+      const toTokenAddress = toToken === "SLN" ? SLN_ADDRESS : toToken;
+
+      // 1inch quote endpoint
+      const quoteUrl = `https://api.1inch.io/v5.0/${BSC_CHAIN_ID}/swap?fromTokenAddress=${fromTokenAddress}&toTokenAddress=${toTokenAddress}&amount=${ethers.parseUnits(amount, 18).toString()}&fromAddress=${address}&slippage=1`;
+
+      const response = await fetch(quoteUrl);
+      const data = await response.json();
+
+      if (!data.tx) return alert("Swap quote failed. Check token addresses or network.");
+
+      // Send transaction
+      const tx = await signer.sendTransaction({
+        to: data.tx.to,
+        data: data.tx.data,
+        value: ethers.parseEther(amount).toString() // if BNB, else 0
+      });
+
+      setTxHash(tx.hash);
+    } catch (err) {
+      console.error(err);
+      alert("Swap failed. See console for details.");
+    }
+  };
+
+  return (
+    <div className="max-w-md mx-auto p-6 rounded-xl shadow-lg bg-white text-center">
+      <h2 className="text-xl font-semibold mb-4">Swap Any Token ⇄ SLN</h2>
+      <input
+        type="text"
+        placeholder="Amount"
+        value={amount}
+        onChange={(e) => setAmount(e.target.value)}
+        className="border p-2 rounded-md mb-2 w-full"
+      />
+      <input
+        type="text"
+        placeholder="From Token Address or Symbol"
+        value={fromToken}
+        onChange={(e) => setFromToken(e.target.value)}
+        className="border p-2 rounded-md mb-2 w-full"
+      />
+      <input
+        type="text"
+        placeholder="To Token (SLN)"
+        value={toToken}
+        onChange={(e) => setToToken(e.target.value)}
+        className="border p-2 rounded-md mb-4 w-full"
+      />
+      <button
+        onClick={handleSwap}
+        className="bg-blue-600 text-white py-2 rounded-lg w-full hover:bg-blue-700 transition"
+      >
+        Swap
+      </button>
+      {txHash && (
+        <p className="text-green-600 mt-3">
+          ✅ Swap sent! Tx Hash:{" "}
+          <a
+            href={`https://bscscan.com/tx/${txHash}`}
+            target="_blank"
+            className="underline"
+          >
+            {txHash.slice(0, 10)}...
+          </a>
+        </p>
+      )}
+    </div>
+  );
+}
