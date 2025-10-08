@@ -34,7 +34,7 @@ This repository hosts the **SlainT Web Dashboard**, a static site built with **H
 | Wallet Integration | MetaMask + Ethers.js |
 | Hosting | [Vercel](https://vercel.com) |
 | Database | [Supabase](https://supabase.com) *(optional, for user data)* |
-| Domain | [BluSta.SlainT.com](https://BluSta.SlainT.com) *(planned)* |
+| Domain | [blusta-slaint.com](https://blusta-slaint.com) *(planned)* |
 
 ---
 
