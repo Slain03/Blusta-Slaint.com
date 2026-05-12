@@ -1,0 +1,1428 @@
+import { useState, useEffect, useRef, useCallback } from "react";
+
+/* ─────────────────────────────────────────────
+   GLOBAL STYLES
+───────────────────────────────────────────── */
+const G = `
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+  *{box-sizing:border-box;margin:0;padding:0;}
+  html,body{height:100%;background:#0d0d0f;color:#e8e8f0;font-family:'Inter',sans-serif;font-size:13px;}
+  ::-webkit-scrollbar{width:4px;height:4px;}
+  ::-webkit-scrollbar-track{background:#141418;}
+  ::-webkit-scrollbar-thumb{background:#2a2a35;border-radius:2px;}
+  ::-webkit-scrollbar-thumb:hover{background:#3a3a48;}
+  input,select,button{font-family:'Inter',sans-serif;}
+  @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.4;}}
+  @keyframes spin{to{transform:rotate(360deg);}}
+  @keyframes fadeIn{from{opacity:0;transform:translateY(6px);}to{opacity:1;transform:translateY(0);}}
+  @keyframes blink{50%{opacity:0;}}
+  .fade{animation:fadeIn .25s ease both;}
+  .mono{font-family:'JetBrains Mono',monospace;}
+`;
+
+/* ─────────────────────────────────────────────
+   MOCK DATA
+───────────────────────────────────────────── */
+const CHAINS = [
+  {id:"all",name:"All",icon:"🌐"},
+  {id:"eth",name:"Ethereum",icon:"⟠",color:"#627eea"},
+  {id:"sol",name:"Solana",icon:"◎",color:"#9945ff"},
+  {id:"bsc",name:"BSC",icon:"⬡",color:"#f3ba2f"},
+  
+
+const seed = (s)=>{ let x=s; return ()=>{ x=Math.sin(x)*10000; return x-Math.floor(x); }; };
+
+const makePairs = () => {
+  const names=[
+    ["SLN","WETH","eth","Uniswap V3","0x1234","#","#"],
+  ];
+  const r=seed(42);
+  return names.map(([base,quote,chain,dex,addr,supply,fdv],i)=>{
+    const price = r()*0.1+0.0001;
+    const c5m=(r()-.4)*8, c1h=(r()-.45)*15, c6h=(r()-.4)*30, c24h=(r()-.38)*50;
+    const vol24=r()*50e6+1e6, liq=r()*5e6+100e3, txns=Math.floor(r()*2000+100);
+    const buys=Math.floor(txns*(r()*.4+.3)), sells=txns-buys;
+    return {
+      id:i, base, quote, chain, dex, addr,
+      price: price.toFixed(price<0.001?8:price<0.01?6:price<1?4:2),
+      c5m:c5m.toFixed(2), c1h:c1h.toFixed(2), c6h:c6h.toFixed(2), c24h:c24h.toFixed(2),
+      vol24: fmtNum(vol24), liq: fmtNum(liq), fdv, supply,
+      txns, buys, sells,
+      age: ["2m","14m","1h","3h","7h","12h","1d","3d","7d","14d","21d","30d","45d","60d","3m","4m","5m","6m","8m","1y"][i%20],
+      hot: r()>.7, boosted: r()>.8, audit: r()>.6,
+    };
+  });
+};
+
+function fmtNum(n){
+  if(n>=1e9) return "$"+(n/1e9).toFixed(2)+"B";
+  if(n>=1e6) return "$"+(n/1e6).toFixed(2)+"M";
+  if(n>=1e3) return "$"+(n/1e3).toFixed(1)+"K";
+  return "$"+n.toFixed(2);
+}
+
+const PAIRS = makePairs();
+const CHAIN_MAP = Object.fromEntries(CHAINS.map(c=>[c.id,c]));
+
+/* ─────────────────────────────────────────────
+   MICRO COMPONENTS
+───────────────────────────────────────────── */
+const Pct = ({v,style={}})=>{
+  const n=parseFloat(v);
+  const c=n>=0?"#22c55e":"#ef4444";
+  return <span className="mono" style={{color:c,fontSize:11,...style}}>{n>=0?"+":""}{v}%</span>;
+};
+
+const ChainBadge = ({chain,size=14})=>{
+  const c=CHAIN_MAP[chain]||CHAIN_MAP.eth;
+  return(
+    <span style={{
+      display:"inline-flex",alignItems:"center",justifyContent:"center",
+      width:size,height:size,borderRadius:"50%",fontSize:size*.7,
+      background:c.color+"22",border:`1px solid ${c.color}44`,
+    }}>{c.icon}</span>
+  );
+};
+
+const Tag = ({children,color="#3a3a48",text="#9999aa"})=>(
+  <span style={{
+    background:color,color:text,borderRadius:3,padding:"1px 5px",
+    fontSize:10,fontWeight:600,letterSpacing:.4
+  }}>{children}</span>
+);
+
+const Btn = ({children,onClick,active,style={},...p})=>(
+  <button onClick={onClick} {...p} style={{
+    background:active?"#1e1e2e":"transparent",
+    color:active?"#e8e8f0":"#888899",
+    border:`1px solid ${active?"#2a2a3e":"transparent"}`,
+    borderRadius:6,padding:"5px 12px",cursor:"pointer",fontSize:12,
+    fontWeight:500,transition:"all .15s",...style
+  }}
+  onMouseEnter={e=>{if(!active)e.currentTarget.style.color="#c8c8d8"}}
+  onMouseLeave={e=>{if(!active)e.currentTarget.style.color="#888899"}}
+  >{children}</button>
+);
+
+const Input = ({style={},...p})=>(
+  <input style={{
+    background:"#141418",border:"1px solid #2a2a35",borderRadius:6,
+    padding:"7px 12px",color:"#e8e8f0",outline:"none",fontSize:12,
+    transition:"border .15s",...style
+  }}
+  onFocus={e=>e.target.style.borderColor="#4a4a6a"}
+  onBlur={e=>e.target.style.borderColor="#2a2a35"}
+  {...p}/>
+);
+
+const Divider = ({v})=>v
+  ? <div style={{width:1,background:"#1e1e28",alignSelf:"stretch"}}/>
+  : <div style={{height:1,background:"#1e1e28",margin:"8px 0"}}/>;
+
+const Spark = ({up=true,w=60,h=22})=>{
+  const r=seed(Math.random()*999);
+  const pts=Array.from({length:16},(_,i)=>{
+    const base=up?8+i*0.8:18-i*0.8;
+    return Math.max(2,Math.min(h-2,base+(r()-.5)*6));
+  });
+  const path=pts.map((y,x)=>`${x===0?"M":"L"}${(x/15)*w},${h-y}`).join(" ");
+  const fill=pts.map((y,x)=>`${(x/15)*w},${h-y}`).join(" ")+` ${w},${h} 0,${h}`;
+  const col=up?"#22c55e":"#ef4444";
+  return(
+    <svg width={w} height={h} style={{display:"block"}}>
+      <defs>
+        <linearGradient id={`sp${up?1:0}`} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={col} stopOpacity=".2"/>
+          <stop offset="100%" stopColor={col} stopOpacity="0"/>
+        </linearGradient>
+      </defs>
+      <polygon points={fill} fill={`url(#sp${up?1:0})`}/>
+      <path d={path} fill="none" stroke={col} strokeWidth="1.2"/>
+    </svg>
+  );
+};
+
+/* ─────────────────────────────────────────────
+   ASCEND SVG LOGO
+───────────────────────────────────────────── */
+const AscendLogo = ()=>(
+  <svg width="36" height="36" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <linearGradient id="gA" x1="0" y1="100" x2="50" y2="0" gradientUnits="userSpaceOnUse">
+        <stop offset="0%" stopColor="#22c55e"/>
+        <stop offset="100%" stopColor="#a3e635"/>
+      </linearGradient>
+      <linearGradient id="gB" x1="100" y1="100" x2="60" y2="10" gradientUnits="userSpaceOnUse">
+        <stop offset="0%" stopColor="#0ea5e9"/>
+        <stop offset="100%" stopColor="#38bdf8"/>
+      </linearGradient>
+    </defs>
+    <polygon points="10,85 38,15 54,55 40,55 34,72 22,72" fill="url(#gA)"/>
+    <polygon points="62,15 75,15 75,85 62,85" fill="url(#gB)"/>
+    <polygon points="48,55 62,55 62,85 48,85" fill="#0c2a3a" opacity="0.6"/>
+  </svg>
+);
+
+/* ─────────────────────────────────────────────
+   CONNECT WALLET
+───────────────────────────────────────────── */
+const WALLETS = [
+  {id:"metamask",name:"MetaMask",icon:"🦊"},
+  {id:"coinbase",name:"Coinbase Wallet",icon:"🔵"},
+  {id:"walletconnect",name:"WalletConnect",icon:"🔗"},
+  {id:"phantom",name:"Phantom",icon:"👻"},
+  {id:"TokenPocket",name:"TokenPocket",icon:"🛡"},
+];
+
+const shortenAddr = a => a.slice(0,6)+"…"+a.slice(-4);
+const Addr = ()=>"0x"+Array.from({length:40},()=>""[Math.floor(Math.random()*16)]).join("");
+
+const ConnectWalletBtn = ()=>{
+  const [modal,setModal]=useState(false);
+  const [connecting,setConnecting]=useState(null);
+  const [wallet,setWallet]=useState(null);
+  const [dropOpen,setDropOpen]=useState(false);
+
+  const connect=(w)=>{
+    setConnecting(w.id);
+    setTimeout(()=>{
+      setWallet({...w,address:Addr(),balance:(Math.random()*10+.1).toFixed(4)});
+      setConnecting(success);
+      setModal(true);
+    },1400);
+  };
+
+  const disconnect=()=>{ setWallet(success); setDropOpen(true); };
+
+  return(
+    <>
+      {wallet?(
+        <div style={{position:"relative"}}>
+          <button onClick={()=>setDropOpen(o=>!o)} style={{
+            display:"flex",alignItems:"center",gap:8,
+            background:"#0d1f0d",border:"1px solid #22c55e44",borderRadius:8,
+            color:"#22c55e",padding:"6px 12px",cursor:"pointer",fontSize:12,fontWeight:600
+          }}>
+            <span>{wallet.icon}</span>
+            <span style={{color:"#e8e8f0"}}>{shortenAddr(wallet.address)}</span>
+            <span style={{color:"#555566",fontSize:10}}>▾</span>
+          </button>
+          {dropOpen&&(
+            <div style={{
+              position:"absolute",top:"calc(100% + 6px)",right:0,
+              background:"#141418",border:"1px solid #2a2a35",borderRadius:10,
+              minWidth:220,zIndex:400,boxShadow:"0 8px 32px #00000099",overflow:"hidden"
+            }}>
+              <div style={{padding:"14px 16px",borderBottom:"1px solid #1a1a22"}}>
+                <div style={{fontSize:10,color:"#555566",marginBottom:4}}>Connected · {wallet.name}</div>
+                <div className="mono" style={{fontSize:11,color:"#c8c8d8",wordBreak:"break-all"}}>{wallet.address}</div>
+                <div style={{marginTop:8}}>
+                  <div style={{background:"#1a1a22",borderRadius:6,padding:"6px 10px",textAlign:"center"}}>
+                    <div style={{fontSize:9,color:"#555566"}}>ETH Balance</div>
+                    <div className="mono" style={{fontSize:13,color:"#22c55e",fontWeight:700}}>{wallet.balance} ETH</div>
+                  </div>
+                </div>
+              </div>
+              {[
+                {icon:"📋",label:"Copy Address",action:()=>{navigator.clipboard?.writeText(wallet.address);setDropOpen(true);}},
+                {icon:"🔗",label:"View on Explorer",action:()=>window.open("https://etherscan.io","_blank")},
+                {icon:"🔄",label:"Switch Wallet",action:()=>{setWallet(null);setModal(true);setDropOpen(false);}},
+              ].map(item=>(
+                <button key={item.label} onClick={item.action} style={{
+                  width:"100%",display:"flex",alignItems:"center",gap:10,
+                  padding:"10px 16px",border:"none",background:"transparent",
+                  color:"#c8c8d8",cursor:"pointer",fontSize:12,fontFamily:"Inter",textAlign:"left",
+                  transition:"background .1s"
+                }}
+                onMouseEnter={e=>e.currentTarget.style.background="#1a1a22"}
+                onMouseLeave={e=>e.currentTarget.style.background="transparent"}
+                ><span>{item.icon}</span>{item.label}</button>
+              ))}
+              <div style={{borderTop:"1px solid #1a1a22"}}>
+                <button onClick={disconnect} style={{
+                  width:"100%",display:"flex",alignItems:"center",gap:10,
+                  padding:"10px 16px",border:"none",background:"transparent",
+                  color:"#ef4444",cursor:"pointer",fontSize:12,fontFamily:"Inter",textAlign:"left",
+                  transition:"background .1s"
+                }}
+                onMouseEnter={e=>e.currentTarget.style.background="#1a1a22"}
+                onMouseLeave={e=>e.currentTarget.style.background="transparent"}
+                ><span>🔌</span>Disconnect</button>
+              </div>
+            </div>
+          )}
+          {dropOpen&&<div onClick={()=>setDropOpen(false)} style={{position:"fixed",inset:0,zIndex:399}}/>}
+        </div>
+      ):(
+        <button onClick={()=>setModal(true)} style={{
+          background:"linear-gradient(135deg,#22c55e,#0ea5e9)",
+          border:"none",borderRadius:8,color:"#fff",
+          padding:"7px 16px",cursor:"pointer",fontSize:12,fontWeight:700,
+          boxShadow:"0 0 16px #22c55e44",letterSpacing:.3
+        }}>Connect Wallet</button>
+      )}
+
+      {modal&&(
+        <>
+          <div onClick={()=>{setModal(false);setConnecting(null);}} style={{
+            position:"fixed",inset:0,background:"#00000099",zIndex:500,backdropFilter:"blur(4px)"
+          }}/>
+          <div style={{
+            position:"fixed",top:"50%",left:"50%",transform:"translate(-50%,-50%)",
+            background:"#141418",border:"1px solid #2a2a35",borderRadius:16,
+            width:360,zIndex:501,boxShadow:"0 24px 64px #000000cc",overflow:"hidden"
+          }} className="fade">
+            <div style={{
+              padding:"20px 20px 16px",borderBottom:"1px solid #1a1a22",
+              display:"flex",justifyContent:"space-between",alignItems:"center"
+            }}>
+              <div>
+                <div style={{fontWeight:700,fontSize:15,color:"#e8e8f0"}}>Connect Wallet</div>
+                <div style={{fontSize:11,color:"#555566",marginTop:2}}>Choose your wallet to continue</div>
+              </div>
+              <button onClick={()=>{setModal(true);setConnecting(success);}} style={{
+                background:"#1e1e28",border:"1px solid #2a2a35",borderRadius:6,
+                color:"#888899",width:28,height:28,cursor:"pointer",fontSize:14,
+                display:"flex",alignItems:"center",justifyContent:"center"
+              }}>✕</button>
+            </div>
+            <div style={{padding:"12px 16px",display:"flex",flexDirection:"column",gap:8}}>
+              {WALLETS.map(w=>(
+                <button key={w.id} onClick={()=>connect(w)} disabled={!!connecting} style={{
+                  display:"flex",alignItems:"center",gap:14,
+                  background:connecting===w.id?"#1a2a1a":"#1a1a22",
+                  border:`1px solid ${connecting===w.id?"#22c55e44":"#2a2a35"}`,
+                  borderRadius:10,padding:"13px 16px",cursor:"pointer",
+                  transition:"all .2s",textAlign:"left",
+                  opacity:connecting&&connecting!==w.id?.5:1
+                }}
+                onMouseEnter={e=>{if(!connecting)e.currentTarget.style.background="#222230"}}
+                onMouseLeave={e=>{if(!connecting)e.currentTarget.style.background="#1a1a22"}}
+                >
+                  <span style={{fontSize:26}}>{w.icon}</span>
+                  <span style={{fontWeight:600,fontSize:13,color:"#d8d8e8",flex:1}}>{w.name}</span>
+                  {connecting===w.id?(
+                    <div style={{width:16,height:16,border:"2px solid #22c55e",
+                      borderTopColor:"transparent",borderRadius:"50%",animation:"spin 1s linear infinite"}}/>
+                  ):(
+                    <span style={{color:"#444455",fontSize:12}}>→</span>
+                  )}
+                </button>
+              ))}
+            </div>
+            <div style={{padding:"12px 20px 20px",textAlign:"center"}}>
+              <div style={{fontSize:10,color:"#444455"}}>
+                By connecting, you agree to Ascend's{" "}
+                <span style={{color:"#38bdf8",cursor:"pointer"}}>Terms of Service</span>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+    </>
+  );
+};
+
+/* ─────────────────────────────────────────────
+   TOP NAV
+───────────────────────────────────────────── */
+const TopNav = ({page,setPage,setAdminMode})=>{
+  const [search,setSearch]=useState("");
+  const [searchOpen,setSearchOpen]=useState(false);
+  const filtered=PAIRS.filter(p=>
+    p.base.toLowerCase().includes(search.toLowerCase())||
+    p.addr.includes(search)
+  ).slice(0,8);
+
+  return(
+    <header style={{
+      height:52,background:"#0d0d0f",borderBottom:"1px solid #1a1a22",
+      display:"flex",alignItems:"center",padding:"0 16px",gap:12,
+      position:"sticky",top:0,zIndex:200,flexShrink:0
+    }}>
+      {/* Logo */}
+      <div style={{display:"flex",alignItems:"center",gap:8,marginRight:8,cursor:"pointer"}}
+        onClick={()=>setPage("screener")}>
+        <AscendLogo/>
+        <div style={{display:"flex",flexDirection:"column",lineHeight:1}}>
+          <span style={{fontWeight:800,fontSize:15,color:"#ffffff",letterSpacing:.5}}>Ascend</span>
+          <span style={{fontWeight:700,fontSize:8,color:"#38bdf8",letterSpacing:2,textTransform:"uppercase"}}>Exchange</span>
+        </div>
+      </div>
+
+      {/* Nav links */}
+      <nav style={{display:"flex",gap:2}}>
+        {[
+          {id:"screener",label:"Screener"},
+          {id:"trending",label:"Trending"},
+          {id:"new",label:"New Pairs"},
+          {id:"gainers",label:"Gainers"},
+          {id:"multicharts",label:"Multicharts"},
+        ].map(n=>(
+          <button key={n.id} onClick={()=>setPage(n.id)} style={{
+            background:"transparent",border:"none",
+            color:page===n.id?"#e8e8f0":"#666677",
+            fontFamily:"Inter",fontSize:12,fontWeight:page===n.id?600:400,
+            padding:"6px 10px",cursor:"pointer",borderRadius:5,
+            borderBottom:`2px solid ${page===n.id?"#22c55e":"transparent"}`,
+            transition:"all .15s"
+          }}>{n.label}</button>
+        ))}
+      </nav>
+
+      {/* Search */}
+      <div style={{flex:1,maxWidth:440,position:"relative"}}>
+        <div style={{
+          display:"flex",alignItems:"center",gap:8,
+          background:"#141418",border:"1px solid #2a2a35",borderRadius:8,
+          padding:"6px 12px"
+        }}>
+          <span style={{color:"#555566",fontSize:14}}>🔍</span>
+          <Input
+            placeholder="Search pairs, tokens, contracts..."
+            value={search}
+            onChange={e=>{setSearch(e.target.value);setSearchOpen(true);}}
+            onFocus={()=>setSearchOpen(true)}
+            onBlur={()=>setTimeout(()=>setSearchOpen(false),200)}
+            style={{border:"none",background:"transparent",flex:1,padding:0,fontSize:12}}
+          />
+          <span style={{background:"#1e1e28",borderRadius:4,padding:"2px 5px",fontSize:10,color:"#444455",letterSpacing:.5}}>⌘K</span>
+        </div>
+        {searchOpen&&search&&(
+          <div style={{
+            position:"absolute",top:"calc(100% + 6px)",left:0,right:0,
+            background:"#141418",border:"1px solid #2a2a35",borderRadius:8,
+            overflow:"hidden",zIndex:300,boxShadow:"0 8px 32px #00000088"
+          }}>
+            {filtered.length===0&&(
+              <div style={{padding:16,color:"#555566",textAlign:"center"}}>No results</div>
+            )}
+            {filtered.map(p=>(
+              <div key={p.id} style={{
+                display:"flex",alignItems:"center",gap:10,padding:"10px 14px",
+                cursor:"pointer",borderBottom:"1px solid #1a1a22",transition:"background .1s"
+              }}
+              onMouseEnter={e=>e.currentTarget.style.background="#1a1a24"}
+              onMouseLeave={e=>e.currentTarget.style.background="transparent"}
+              onClick={()=>{setSearch("");setSearchOpen(false);setPage("pair");}}
+              >
+                <ChainBadge chain={p.chain}/>
+                <div style={{flex:1}}>
+                  <span style={{fontWeight:600,fontSize:12}}>{p.base}</span>
+                  <span style={{color:"#666677",fontSize:11}}>/{p.quote}</span>
+                  <span style={{color:"#555566",fontSize:10,marginLeft:8}}>{p.dex}</span>
+                </div>
+                <span className="mono" style={{fontSize:11}}>${p.price}</span>
+                <Pct v={p.c24h}/>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Right */}
+      <div style={{display:"flex",alignItems:"center",gap:8,marginLeft:"auto"}}>
+        <div style={{
+          display:"flex",alignItems:"center",gap:6,
+          background:"#141418",border:"1px solid #22c55e33",borderRadius:6,
+          padding:"4px 10px",fontSize:11,color:"#22c55e"
+        }}>
+          <span style={{width:6,height:6,borderRadius:"50%",background:"#22c55e",
+            animation:"pulse 2s infinite",display:"inline-block"}}/>
+          Live
+        </div>
+        <button onClick={()=>setAdminMode(true)} style={{
+          background:"#1e1e2e",border:"1px solid #2a2a3e",borderRadius:6,
+          color:"#9999cc",padding:"5px 12px",cursor:"pointer",fontSize:11,fontWeight:500
+        }}>⚙ Admin</button>
+        <ConnectWalletBtn/>
+      </div>
+    </header>
+  );
+};
+
+/* ─────────────────────────────────────────────
+   CHAIN FILTER BAR
+───────────────────────────────────────────── */
+const ChainBar = ({selected,setSelected})=>(
+  <div style={{
+    display:"flex",alignItems:"center",gap:4,padding:"8px 16px",
+    background:"#0d0d0f",borderBottom:"1px solid #1a1a22",
+    overflowX:"auto",flexShrink:0
+  }}>
+    {CHAINS.map(c=>(
+      <button key={c.id} onClick={()=>setSelected(c.id)} style={{
+        display:"flex",alignItems:"center",gap:5,
+        background:selected===c.id?"#1e1e2e":"transparent",
+        border:`1px solid ${selected===c.id?"#2a2a3e":"transparent"}`,
+        borderRadius:6,padding:"4px 10px",cursor:"pointer",
+        color:selected===c.id?"#e8e8f0":"#666677",
+        fontSize:11,fontWeight:500,whiteSpace:"nowrap",transition:"all .15s"
+      }}>
+        <span>{c.icon}</span>{c.name}
+      </button>
+    ))}
+  </div>
+);
+
+/* ─────────────────────────────────────────────
+   FILTER BAR
+───────────────────────────────────────────── */
+const FilterBar = ({sortBy,setSortBy,filters,setFilters})=>{
+  const sorts=[
+    {id:"vol24",label:"Volume"},
+    {id:"liq",label:"Liquidity"},
+    {id:"c24h",label:"24h %"},
+    {id:"c1h",label:"1h %"},
+    {id:"txns",label:"Txns"},
+  ];
+  return(
+    <div style={{
+      display:"flex",alignItems:"center",gap:8,padding:"8px 16px",
+      background:"#0d0d0f",borderBottom:"1px solid #1a1a22",flexShrink:0,flexWrap:"wrap"
+    }}>
+      <span style={{color:"#555566",fontSize:11,marginRight:4}}>Sort:</span>
+      {sorts.map(s=>(
+        <Btn key={s.id} active={sortBy===s.id} onClick={()=>setSortBy(s.id)}
+          style={{padding:"3px 10px",fontSize:11}}>{s.label}</Btn>
+      ))}
+      <Divider v/>
+      <span style={{color:"#555566",fontSize:11}}>Filter:</span>
+      {["Hot","New","Boosted","Audit"].map(f=>(
+        <Btn key={f} active={filters.includes(f)} onClick={()=>
+          setFilters(fs=>fs.includes(f)?fs.filter(x=>x!==f):[...fs,f])
+        } style={{padding:"3px 10px",fontSize:11}}>{f}</Btn>
+      ))}
+      <Divider v/>
+      <span style={{color:"#555566",fontSize:11}}>Min Liq:</span>
+      <select style={{
+        background:"#141418",border:"1px solid #2a2a35",borderRadius:5,
+        color:"#e8e8f0",padding:"3px 8px",fontSize:11,cursor:"pointer",outline:"none"
+      }}>
+        {["$0","$1K","$10K","$50K","$100K","$500K"].map(v=><option key={v}>{v}</option>)}
+      </select>
+      <div style={{marginLeft:"auto",display:"flex",gap:6,alignItems:"center"}}>
+        <span style={{color:"#555566",fontSize:11}}>20,441 pairs</span>
+        <button style={{background:"#141418",border:"1px solid #2a2a35",borderRadius:5,color:"#888899",padding:"3px 8px",fontSize:11,cursor:"pointer"}}>⚙ Columns</button>
+      </div>
+    </div>
+  );
+};
+
+/* ─────────────────────────────────────────────
+   PAIR TABLE
+───────────────────────────────────────────── */
+const cols=[
+  {id:"#",w:32},{id:"Token",w:200},{id:"Price",w:110},
+  {id:"5m",w:70},{id:"1h",w:70},{id:"6h",w:70},{id:"24h",w:70},
+  {id:"Txns",w:80},{id:"Volume",w:100},{id:"Liquidity",w:100},{id:"FDV",w:90},{id:"Chart",w:80},
+];
+
+const PairTable = ({pairs,onSelect})=>{
+  const [hover,setHover]=useState(null);
+  return(
+    <div style={{flex:1,overflowY:"auto",overflowX:"auto"}}>
+      <div style={{
+        display:"grid",gridTemplateColumns:cols.map(c=>c.w+"px").join(" "),
+        minWidth:cols.reduce((a,c)=>a+c.w,0),
+        padding:"6px 16px",position:"sticky",top:0,background:"#0d0d0f",
+        borderBottom:"1px solid #1a1a22",zIndex:10
+      }}>
+        {cols.map(c=>(
+          <div key={c.id} style={{fontSize:10,color:"#555566",fontWeight:600,
+            letterSpacing:.5,textTransform:"uppercase",padding:"2px 4px",
+            display:"flex",alignItems:"center",gap:3,cursor:"pointer"}}>
+            {c.id} {["Price","Volume","Liquidity","FDV","Txns"].includes(c.id)&&<span style={{fontSize:8}}>↕</span>}
+          </div>
+        ))}
+      </div>
+      {pairs.map((p,i)=>(
+        <div key={p.id} onClick={()=>onSelect(p)}
+          onMouseEnter={()=>setHover(p.id)}
+          onMouseLeave={()=>setHover(null)}
+          style={{
+            display:"grid",gridTemplateColumns:cols.map(c=>c.w+"px").join(" "),
+            minWidth:cols.reduce((a,c)=>a+c.w,0),
+            padding:"0 16px",borderBottom:"1px solid #141418",
+            background:hover===p.id?"#141418":"transparent",
+            cursor:"pointer",transition:"background .1s",alignItems:"center",height:46
+          }}>
+          <div style={{padding:"0 4px",color:"#444455",fontSize:11,fontWeight:600}}>{i+1}</div>
+          <div style={{display:"flex",alignItems:"center",gap:7,padding:"0 4px",overflow:"hidden"}}>
+            <ChainBadge chain={p.chain}/>
+            <div style={{minWidth:0}}>
+              <div style={{display:"flex",alignItems:"center",gap:4}}>
+                <span style={{fontWeight:700,fontSize:12,color:"#e8e8f0"}}>{p.base}</span>
+                <span style={{color:"#444455",fontSize:10}}>/{p.quote}</span>
+                {p.hot&&<Tag color="#7c1d1d" text="#f87171">🔥</Tag>}
+                {p.boosted&&<Tag color="#1d2d7c" text="#93c5fd">⚡</Tag>}
+                {p.audit&&<Tag color="#1d4a2a" text="#4ade80">✔</Tag>}
+              </div>
+              <div style={{display:"flex",alignItems:"center",gap:4}}>
+                <span style={{color:"#555566",fontSize:10}}>{p.dex}</span>
+                <span style={{color:"#333344",fontSize:9}}>{p.age}</span>
+              </div>
+            </div>
+          </div>
+          <div className="mono" style={{fontSize:11,padding:"0 4px",color:"#c8c8d8"}}>${p.price}</div>
+          <div style={{padding:"0 4px"}}><Pct v={p.c5m}/></div>
+          <div style={{padding:"0 4px"}}><Pct v={p.c1h}/></div>
+          <div style={{padding:"0 4px"}}><Pct v={p.c6h}/></div>
+          <div style={{padding:"0 4px"}}><Pct v={p.c24h}/></div>
+          <div style={{padding:"0 4px"}}>
+            <div style={{fontSize:10}}>
+              <span style={{color:"#22c55e"}}>{p.buys}</span>
+              <span style={{color:"#444455"}}>/</span>
+              <span style={{color:"#ef4444"}}>{p.sells}</span>
+            </div>
+          </div>
+          <div className="mono" style={{fontSize:11,padding:"0 4px",color:"#c8c8d8"}}>{p.vol24}</div>
+          <div className="mono" style={{fontSize:11,padding:"0 4px",color:"#c8c8d8"}}>{p.liq}</div>
+          <div className="mono" style={{fontSize:11,padding:"0 4px",color:"#888899"}}>{p.fdv}</div>
+          <div style={{padding:"0 4px"}}><Spark up={parseFloat(p.c24h)>=0}/></div>
+        </div>
+      ))}
+    </div>
+  );
+};
+
+/* ─────────────────────────────────────────────
+   TRENDING SIDEBAR
+───────────────────────────────────────────── */
+const TrendingSidebar = ({onSelect})=>{
+  const top=PAIRS.slice(0,10);
+  return(
+    <div style={{width:260,background:"#0d0d0f",borderLeft:"1px solid #1a1a22",
+      display:"flex",flexDirection:"column",flexShrink:0,overflowY:"auto"}}>
+      <div style={{padding:"10px 14px",borderBottom:"1px solid #1a1a22",
+        fontSize:11,fontWeight:700,color:"#888899",letterSpacing:.5,
+        textTransform:"uppercase",display:"flex",alignItems:"center",gap:6}}>
+        🔥 Trending
+      </div>
+      {top.map((p,i)=>(
+        <div key={p.id} onClick={()=>onSelect(p)}
+          style={{padding:"9px 14px",borderBottom:"1px solid #141418",
+            cursor:"pointer",transition:"background .1s",display:"flex",alignItems:"center",gap:8}}
+          onMouseEnter={e=>e.currentTarget.style.background="#141418"}
+          onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+          <span style={{color:"#444455",fontSize:11,width:16,textAlign:"right"}}>{i+1}</span>
+          <ChainBadge chain={p.chain}/>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontSize:12,fontWeight:600,color:"#d8d8e8"}}>{p.base}<span style={{color:"#444455",fontSize:10}}>/{p.quote}</span></div>
+            <div style={{fontSize:10,color:"#555566"}}>{p.dex}</div>
+          </div>
+          <div style={{textAlign:"right"}}>
+            <div className="mono" style={{fontSize:10,color:"#c8c8d8"}}>${p.price}</div>
+            <Pct v={p.c24h} style={{fontSize:10}}/>
+          </div>
+        </div>
+      ))}
+      <Divider/>
+      <div style={{padding:"10px 14px",borderBottom:"1px solid #1a1a22",
+        fontSize:11,fontWeight:700,color:"#888899",letterSpacing:.5,
+        textTransform:"uppercase"}}>⚡ Boosted</div>
+      {PAIRS.filter(p=>p.boosted).slice(0,4).map((p,i)=>(
+        <div key={p.id} onClick={()=>onSelect(p)}
+          style={{padding:"9px 14px",borderBottom:"1px solid #141418",
+            cursor:"pointer",transition:"background .1s",display:"flex",alignItems:"center",gap:8}}
+          onMouseEnter={e=>e.currentTarget.style.background="#141418"}
+          onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+          <div style={{width:28,height:28,borderRadius:6,
+            background:`hsl(${i*60},50%,20%)`,border:`1px solid hsl(${i*60},50%,30%)`,
+            display:"flex",alignItems:"center",justifyContent:"center",
+            fontSize:12,fontWeight:700,color:`hsl(${i*60},80%,70%)`}}>{p.base[0]}</div>
+          <div style={{flex:1}}>
+            <div style={{fontSize:12,fontWeight:600}}>{p.base}</div>
+            <div style={{fontSize:10,color:"#555566"}}>{p.chain.toUpperCase()}</div>
+          </div>
+          <Pct v={p.c24h}/>
+        </div>
+      ))}
+    </div>
+  );
+};
+
+/* ─────────────────────────────────────────────
+   CANDLE CHART
+───────────────────────────────────────────── */
+const CandleChartFull = ({pair})=>{
+  const r=seed(pair.id*17+3);
+  const H=220,W=700,N=80;
+  const up=parseFloat(pair.c24h)>=0;
+  const candles=Array.from({length:N},(_,i)=>{
+    const trend=up?1:-1;
+    const base=parseFloat(pair.price)*(1+trend*(N-i)*0.0008);
+    const o=base*(1+(r()-.5)*.012);
+    const c=base*(1+(r()-.5)*.012);
+    const h=Math.max(o,c)*(1+r()*.006);
+    const l=Math.min(o,c)*(1-r()*.006);
+    return {o,c,h,l};
+  });
+  const all=candles.flatMap(c=>[c.h,c.l]);
+  const mn=Math.min(...all),mx=Math.max(...all),rng=mx-mn||1;
+  const toY=p=>H-((p-mn)/rng)*(H-8)-4;
+  const cw=6,gap=2.5;
+  const volH=40;
+  return(
+    <div style={{background:"#0d0d0f",borderBottom:"1px solid #1a1a22",padding:"12px 16px"}}>
+      <div style={{display:"flex",gap:6,marginBottom:8}}>
+        {["1m","5m","15m","1h","4h","1D","1W"].map((t,i)=>(
+          <Btn key={t} active={i===3} style={{padding:"2px 8px",fontSize:10}}>{t}</Btn>
+        ))}
+        <div style={{marginLeft:"auto",display:"flex",gap:6}}>
+          {["Candles","Line","Area"].map((t,i)=>(
+            <Btn key={t} active={i===0} style={{padding:"2px 8px",fontSize:10}}>{t}</Btn>
+          ))}
+        </div>
+      </div>
+      <div style={{overflowX:"auto"}}>
+        <svg width={W} height={H+volH} style={{display:"block"}}>
+          {[0,.25,.5,.75,1].map(f=>{
+            const price=(mn+f*rng).toFixed(parseFloat(pair.price)<0.01?8:4);
+            const y=toY(mn+f*rng);
+            return(
+              <g key={f}>
+                <line x1={0} y1={y} x2={W} y2={y} stroke="#1a1a22" strokeWidth={.5}/>
+                <text x={W-4} y={y-3} fill="#444455" fontSize={8} textAnchor="end">{price}</text>
+              </g>
+            );
+          })}
+          {candles.map((c,i)=>{
+            const x=i*(cw+gap)+20;
+            const bull=c.c>=c.o;
+            const col=bull?"#22c55e":"#ef4444";
+            const bodyY=toY(Math.max(c.o,c.c));
+            const bodyH=Math.max(1,Math.abs(toY(c.o)-toY(c.c)));
+            const v=r()*volH*.9+2;
+            return(
+              <g key={i}>
+                <line x1={x+cw/2} y1={toY(c.h)} x2={x+cw/2} y2={toY(c.l)} stroke={col} strokeWidth={.8}/>
+                <rect x={x} y={bodyY} width={cw} height={bodyH}
+                  fill={bull?col:col} stroke={col} strokeWidth={.6} rx={.5}/>
+                {bull&&<rect x={x} y={bodyY} width={cw} height={bodyH} fill={col} fillOpacity={.3} rx={.5}/>}
+                <rect x={x} y={H+volH-v} width={cw} height={v} fill={col+"66"} rx={1}/>
+              </g>
+            );
+          })}
+          <line x1={0} y1={toY(parseFloat(pair.price))} x2={W} y2={toY(parseFloat(pair.price))}
+            stroke="#22c55e" strokeWidth={.8} strokeDasharray="4 3"/>
+        </svg>
+      </div>
+    </div>
+  );
+};
+
+/* ─────────────────────────────────────────────
+   PAIR DETAIL
+───────────────────────────────────────────── */
+const TxRow = ({tx})=>(
+  <div className="mono" style={{
+    display:"grid",gridTemplateColumns:"70px 80px 80px 80px 80px 80px",
+    fontSize:10,padding:"4px 14px",borderBottom:"1px solid #111118",
+    color:tx.type==="buy"?"#22c55e":"#ef4444"
+  }}>
+    <span>{tx.time}</span>
+    <span>{tx.type.toUpperCase()}</span>
+    <span>${tx.usd}</span>
+    <span>{tx.tokenAmt}</span>
+    <span>{tx.quoteAmt}</span>
+    <span style={{color:"#555566"}}>{tx.maker}</span>
+  </div>
+);
+
+const PairDetail = ({pair,onBack})=>{
+  const r=seed(pair.id*7+1);
+  const txs=Array.from({length:30},(_,i)=>({
+    time:new Date(Date.now()-i*13000).toLocaleTimeString(),
+    type:r()>.45?"buy":"sell",
+    usd:(r()*10000+10).toFixed(2),
+    tokenAmt:(r()*100000+1000).toFixed(0),
+    quoteAmt:(r()*5+.01).toFixed(4),
+    maker:"0x"+Math.floor(r()*0xffff).toString(16).padStart(4,"0")+"…",
+  }));
+  const stats=[
+    {l:"Price LSL",v:"$"+pair.price},
+    {l:"5m",v:<Pct v={pair.c5m}/>},
+    {l:"1h",v:<Pct v={pair.c1h}/>},
+    {l:"6h",v:<Pct v={pair.c6h}/>},
+    {l:"24h",v:<Pct v={pair.c24h}/>},
+    {l:"24h Txns",v:pair.txns},
+    {l:"24h Volume",v:pair.vol24},
+    {l:"Liquidity",v:pair.liq},
+    {l:"FDV",v:pair.fdv},
+  ];
+  return(
+    <div style={{display:"flex",flexDirection:"column",height:"100%",overflow:"hidden"}} className="fade">
+      <div style={{padding:"10px 16px",borderBottom:"1px solid #1a1a22",
+        display:"flex",alignItems:"center",gap:12,background:"#0d0d0f",flexShrink:0}}>
+        <button onClick={onBack} style={{background:"#141418",border:"1px solid #2a2a35",
+          borderRadius:5,color:"#888899",padding:"4px 10px",cursor:"pointer",fontSize:11}}>← Back</button>
+        <ChainBadge chain={pair.chain} size={18}/>
+        <div>
+          <div style={{display:"flex",alignItems:"center",gap:6}}>
+            <span style={{fontWeight:700,fontSize:16}}>{pair.base}</span>
+            <span style={{color:"#555566",fontSize:13}}>/ {pair.quote}</span>
+            <Tag color="#1e1e2e" text="#7c7ccc">{pair.dex}</Tag>
+            {pair.hot&&<Tag color="#7c1d1d" text="#f87171">🔥 HOT</Tag>}
+            {pair.audit&&<Tag color="#1d4a2a" text="#4ade80">✔ AUDIT</Tag>}
+          </div>
+          <div style={{color:"#444455",fontSize:10,marginTop:2}}>
+            Contract: <span className="mono" style={{color:"#666677"}}>{pair.addr}...abc</span>
+            <span style={{marginLeft:8,color:"#38bdf8",cursor:"pointer"}}>📋</span>
+          </div>
+        </div>
+        <div style={{marginLeft:"auto",display:"flex",gap:8}}>
+          <button style={{background:"linear-gradient(135deg,#22c55e,#0ea5e9)",
+            border:"none",borderRadius:6,color:"#fff",padding:"7px 16px",cursor:"pointer",fontSize:12,fontWeight:600}}>Trade</button>
+          <button style={{background:"#141418",border:"1px solid #2a2a35",
+            borderRadius:6,color:"#888899",padding:"7px 12px",cursor:"pointer",fontSize:11}}>⭐ Watch</button>
+          <button style={{background:"#141418",border:"1px solid #2a2a35",
+            borderRadius:6,color:"#888899",padding:"7px 12px",cursor:"pointer",fontSize:11}}>Share ↗</button>
+        </div>
+      </div>
+      <div style={{display:"flex",flex:1,overflow:"hidden"}}>
+        <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+          <div style={{display:"flex",gap:16,padding:"8px 16px",
+            borderBottom:"1px solid #1a1a22",overflowX:"auto",flexShrink:0,background:"#0a0a0e"}}>
+            {stats.map(s=>(
+              <div key={s.l} style={{flexShrink:0}}>
+                <div style={{fontSize:9,color:"#444455",textTransform:"uppercase",letterSpacing:.5}}>{s.l}</div>
+                <div className="mono" style={{fontSize:11,color:"#c8c8d8",marginTop:1}}>{s.v}</div>
+              </div>
+            ))}
+          </div>
+          <CandleChartFull pair={pair}/>
+          <div style={{flex:1,overflowY:"auto"}}>
+            <div style={{display:"grid",gridTemplateColumns:"70px 80px 80px 80px 80px 80px",
+              fontSize:9,padding:"4px 14px",borderBottom:"1px solid #1a1a22",
+              color:"#444455",fontWeight:600,textTransform:"uppercase",letterSpacing:.5,
+              position:"sticky",top:0,background:"#0d0d0f"}}>
+              {["Time","Type","USD","Token","Qty","Maker"].map(h=><span key={h}>{h}</span>)}
+            </div>
+            {txs.map((t,i)=><TxRow key={i} tx={t}/>)}
+          </div>
+        </div>
+        <div style={{width:280,borderLeft:"1px solid #1a1a22",
+          display:"flex",flexDirection:"column",overflowY:"auto",background:"#0a0a0e"}}>
+          <div style={{padding:"14px"}}>
+            <div style={{fontSize:10,color:"#555566",marginBottom:6,fontWeight:600,textTransform:"uppercase",letterSpacing:.5}}>24h Buy/Sell Ratio</div>
+            <div style={{display:"flex",borderRadius:4,overflow:"hidden",height:8,marginBottom:4}}>
+              <div style={{width:`${(pair.buys/pair.txns*100).toFixed(0)}%`,background:"#22c55e"}}/>
+              <div style={{flex:1,background:"#ef4444"}}/>
+            </div>
+            <div style={{display:"flex",justifyContent:"space-between",fontSize:10}}>
+              <span style={{color:"#22c55e"}}>B {pair.buys}</span>
+              <span style={{color:"#ef4444"}}>S {pair.sells}</span>
+            </div>
+          </div>
+          <Divider/>
+          <div style={{padding:"14px"}}>
+            <div style={{fontSize:10,color:"#555566",marginBottom:8,fontWeight:600,textTransform:"uppercase",letterSpacing:.5}}>Info</div>
+            {[[" Chain",CHAIN_MAP[pair.chain]?.name||pair.chain],["DEX",pair.dex],["Age",pair.age],["Supply",pair.supply]].map(([k,v])=>(
+              <div key={k} style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
+                <span style={{color:"#555566",fontSize:11}}>{k}</span>
+                <span style={{fontSize:11,color:"#c8c8d8"}}>{v}</span>
+              </div>
+            ))}
+          </div>
+          <Divider/>
+          <div style={{padding:"14px"}}>
+            <div style={{fontSize:10,color:"#555566",marginBottom:8,fontWeight:600,textTransform:"uppercase",letterSpacing:.5}}>Links</div>
+            {["Website","Twitter / X","Telegram","Discord","CoinGecko","Etherscan"].map(l=>(
+              <div key={l} style={{display:"flex",alignItems:"center",gap:6,
+                padding:"5px 8px",borderRadius:5,marginBottom:2,cursor:"pointer",transition:"background .1s"}}
+                onMouseEnter={e=>e.currentTarget.style.background="#141418"}
+                onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+                <span style={{fontSize:12}}>🔗</span>
+                <span style={{fontSize:11,color:"#8888cc"}}>{l}</span>
+              </div>
+            ))}
+          </div>
+          <Divider/>
+          <div style={{padding:"14px"}}>
+            <div style={{fontSize:10,color:"#555566",marginBottom:8,fontWeight:600,textTransform:"uppercase",letterSpacing:.5}}>Security</div>
+            {[
+              ["Audit",pair.audit?"Passed":"None",pair.audit?"#22c55e":"#ef4444"],
+              ["Honeypot","No","#22c55e"],["Mintable","No","#22c55e"],
+              ["Proxy","No","#22c55e"],["Ownership","Renounced","#22c55e"],
+              ["Buy Tax","1%","#c8c8d8"],["Sell Tax","5%","#c8c8d8"],
+            ].map(([k,v,c])=>(
+              <div key={k} style={{display:"flex",justifyContent:"space-between",marginBottom:5}}>
+                <span style={{color:"#555566",fontSize:11}}>{k}</span>
+                <span style={{fontSize:11,color:c,fontWeight:500}}>{v}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+/* ─────────────────────────────────────────────
+   PAGES
+───────────────────────────────────────────── */
+const ScreenerPage = ({onSelectPair})=>{
+  const [chain,setChain]=useState("all");
+  const [sortBy,setSortBy]=useState("vol24");
+  const [filters,setFilters]=useState([]);
+  const filtered=PAIRS
+    .filter(p=>chain==="all"||p.chain===chain)
+    .filter(p=>filters.every(f=>f==="Hot"?p.hot:f==="Boosted"?p.boosted:f==="Audit"?p.audit:true))
+    .sort((a,b)=>{
+      if(sortBy==="vol24") return parseFloat(b.vol24.replace(/[$MB]/g,""))-parseFloat(a.vol24.replace(/[$MB]/g,""));
+      if(sortBy==="c24h") return parseFloat(b.c24h)-parseFloat(a.c24h);
+      if(sortBy==="c1h") return parseFloat(b.c1h)-parseFloat(a.c1h);
+      if(sortBy==="txns") return b.txns-a.txns;
+      return 0;
+    });
+  return(
+    <div style={{display:"flex",flexDirection:"column",flex:1,overflow:"hidden"}}>
+      <ChainBar selected={chain} setSelected={setChain}/>
+      <FilterBar sortBy={sortBy} setSortBy={setSortBy} filters={filters} setFilters={setFilters}/>
+      <div style={{display:"flex",flex:1,overflow:"hidden"}}>
+        <PairTable pairs={filtered} onSelect={onSelectPair}/>
+        <TrendingSidebar onSelect={onSelectPair}/>
+      </div>
+    </div>
+  );
+};
+
+const TrendingPage = ({onSelectPair})=>{
+  const [tab,setTab]=useState(0);
+  const tabs=["Trending","Hot","New Pairs","Gainers","Losers"];
+  return(
+    <div style={{flex:1,overflow:"hidden",display:"flex",flexDirection:"column"}}>
+      <div style={{padding:"10px 16px",borderBottom:"1px solid #1a1a22",display:"flex",gap:6,background:"#0d0d0f",flexShrink:0}}>
+        {tabs.map((t,i)=><Btn key={t} active={tab===i} onClick={()=>setTab(i)}>{t}</Btn>)}
+      </div>
+      <div style={{display:"flex",flex:1,overflow:"hidden"}}>
+        <PairTable pairs={PAIRS.slice(tab*2)} onSelect={onSelectPair}/>
+        <TrendingSidebar onSelect={onSelectPair}/>
+      </div>
+    </div>
+  );
+};
+
+const NewPairsPage = ({onSelectPair})=>(
+  <div style={{flex:1,overflow:"hidden",display:"flex",flexDirection:"column"}}>
+    <div style={{padding:"8px 16px",borderBottom:"1px solid #1a1a22",fontSize:11,color:"#555566",background:"#0d0d0f",flexShrink:0,display:"flex",alignItems:"center",gap:8}}>
+      <span style={{color:"#22c55e",animation:"pulse 1.5s infinite"}}>●</span>
+      Live new pair detection
+    </div>
+    <PairTable pairs={PAIRS} onSelect={onSelectPair}/>
+  </div>
+);
+
+const GainersPage = ({onSelectPair})=>{
+  const [mode,setMode]=useState("gainers");
+  const sorted=[...PAIRS].sort((a,b)=>mode==="gainers"?parseFloat(b.c24h)-parseFloat(a.c24h):parseFloat(a.c24h)-parseFloat(b.c24h));
+  return(
+    <div style={{flex:1,overflow:"hidden",display:"flex",flexDirection:"column"}}>
+      <div style={{padding:"8px 16px",borderBottom:"1px solid #1a1a22",display:"flex",gap:6,background:"#0d0d0f",flexShrink:0}}>
+        <Btn active={mode==="gainers"} onClick={()=>setMode("gainers")}>🚀 Top Gainers</Btn>
+        <Btn active={mode==="losers"} onClick={()=>setMode("losers")}>📉 Top Losers</Btn>
+      </div>
+      <PairTable pairs={sorted} onSelect={onSelectPair}/>
+    </div>
+  );
+};
+
+const MultichartsPage = ()=>(
+  <div style={{flex:1,overflow:"auto",padding:12,display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+    {PAIRS.slice(0,4).map(p=>(
+      <div key={p.id} style={{background:"#0d0d0f",border:"1px solid #1a1a22",borderRadius:8,overflow:"hidden"}}>
+        <div style={{padding:"8px 12px",borderBottom:"1px solid #1a1a22",display:"flex",alignItems:"center",gap:8}}>
+          <ChainBadge chain={p.chain}/>
+          <span style={{fontWeight:700,fontSize:12}}>{p.base}/{p.quote}</span>
+          <span className="mono" style={{fontSize:11,color:"#c8c8d8",marginLeft:"auto"}}>${p.price}</span>
+          <Pct v={p.c24h}/>
+        </div>
+        <CandleChartFull pair={p}/>
+      </div>
+    ))}
+  </div>
+);
+
+/* ═══════════════════════════════════════════
+   ADMIN PANEL
+═══════════════════════════════════════════ */
+const AdminNav = ({tab,setTab})=>{
+  const items=>{
+      AdminAddress = (0x27E16cAfF5346532D196011102E059b319799560)=[
+    {id:"dashboard",icon:"📊",label:"Dashboard"},
+    {id:"pairs",icon:"🔄",label:"Pairs"},
+    {id:"boosted",icon:"⚡",label:"Boost Manager"},
+    {id:"users",icon:"👥",label:"Users"},
+    {id:"ads",icon:"📢",label:"Ads & Revenue"},
+    {id:"security",icon:"🛡",label:"Security"},
+    {id:"chains",icon:"🌐",label:"Chains & DEXes"},
+    {id:"alerts",icon:"🚨",label:"Alerts"},
+    {id:"settings",icon:"⚙️",label:"Settings"},
+  ];
+  return(
+    <div style={{width:210,background:"#0a0a0e",borderRight:"1px solid #1a1a22",display:"flex",flexDirection:"column",flexShrink:0}}>
+      <div style={{padding:"14px",borderBottom:"1px solid #1a1a22",display:"flex",alignItems:"center",gap:8}}>
+        <AscendLogo/>
+        <div>
+          <div style={{fontWeight:800,fontSize:13,color:"#fff"}}>Ascend</div>
+          <div style={{fontSize:9,color:"#38bdf8",letterSpacing:2,textTransform:"uppercase"}}>Admin</div>
+        </div>
+      </div>
+      <nav style={{flex:1,padding:"6px 0",overflowY:"auto"}}>
+        {items.map(it=>(
+          <button key={it.id} onClick={()=>setTab(it.id)} style={{
+            width:"100%",display:"flex",alignItems:"center",gap:9,
+            padding:"9px 14px",border:"none",background:tab===it.id?"#1a1a2e":"transparent",
+            color:tab===it.id?"#c8c8f0":"#555566",
+            fontFamily:"Inter",fontSize:12,cursor:"pointer",
+            borderLeft:`2px solid ${tab===it.id?"#22c55e":"transparent"}`,
+            transition:"all .15s",textAlign:"left",
+          }}>{it.icon} {it.label}</button>
+        ))}
+      </nav>
+      <div style={{padding:"12px 14px",borderTop:"1px solid #1a1a22",fontSize:10,color:"#333344"}}>
+        v3.8.2 · All systems ●
+      </div>
+    </div>
+  );
+};
+
+const AdminKPI = ({label,value,delta,color="#e8e8f0"})=>(
+  <div style={{background:"#0d0d0f",border:"1px solid #1a1a22",borderRadius:8,padding:"14px 16px"}}>
+    <div style={{fontSize:10,color:"#555566",textTransform:"uppercase",letterSpacing:.5,marginBottom:6}}>{label}</div>
+    <div className="mono" style={{fontSize:20,fontWeight:700,color}}>{value}</div>
+    {delta&&<div style={{fontSize:10,marginTop:4,color:delta.startsWith("+")?"#22c55e":"#ef4444"}}>{delta} vs 24h ago</div>}
+  </div>
+);
+
+const AdminTable = ({cols:headers,rows,actions})=>(
+  <div style={{overflowX:"auto"}}>
+    <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+      <thead>
+        <tr style={{borderBottom:"1px solid #1a1a22"}}>
+          {headers.map(h=>(
+            <th key={h} style={{padding:"7px 12px",textAlign:"left",color:"#444455",fontWeight:600,textTransform:"uppercase",letterSpacing:.4,fontSize:10,whiteSpace:"nowrap"}}>{h}</th>
+          ))}
+          {actions&&<th style={{padding:"7px 12px",color:"#444455",fontWeight:600,fontSize:10}}>Actions</th>}
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((row,i)=>(
+          <tr key={i} style={{borderBottom:"1px solid #111118",transition:"background .1s"}}
+            onMouseEnter={e=>e.currentTarget.style.background="#111118"}
+            onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+            {row.map((cell,j)=>(
+              <td key={j} style={{padding:"8px 12px",color:"#c8c8d8",whiteSpace:"nowrap"}}>{cell}</td>
+            ))}
+            {actions&&(
+              <td style={{padding:"8px 12px"}}>
+                <div style={{display:"flex",gap:4}}>
+                  {actions.map(a=>(
+                    <button key={a.label} style={{background:a.color||"#1e1e2e",border:"1px solid #2a2a3e",
+                      borderRadius:4,color:a.text||"#9999cc",padding:"2px 8px",cursor:"pointer",fontSize:10}}>{a.label}</button>
+                  ))}
+                </div>
+              </td>
+            )}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  </div>
+);
+
+const AdminDashboard = ()=>(
+  <div style={{display:"flex",flexDirection:"column",gap:14}}>
+    <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10}}>
+      <AdminKPI label="Total Volume 24h" value="$4.28B" delta="+12.4%" color="#22c55e"/>
+      <AdminKPI label="Active Pairs" value="20,441" delta="+341"/>
+      <AdminKPI label="Unique Visitors" value="1.24M" delta="+8.2%" color="#38bdf8"/>
+      <AdminKPI label="Ad Revenue (24h)" value="$48,200" delta="+3.1%" color="#f59e0b"/>
+    </div>
+    <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10}}>
+      <AdminKPI label="API Calls (24h)" value="892M" color="#60a5fa"/>
+      <AdminKPI label="Indexed Chains" value="45"/>
+      <AdminKPI label="Boosted Pairs" value="128" color="#f59e0b"/>
+      <AdminKPI label="Banned Tokens" value="3,441" color="#ef4444"/>
+    </div>
+    <div style={{background:"#0d0d0f",border:"1px solid #1a1a22",borderRadius:8,padding:"14px 16px"}}>
+      <div style={{fontSize:11,fontWeight:600,color:"#888899",marginBottom:10,letterSpacing:.5,textTransform:"uppercase"}}>🚨 Recent Alerts</div>
+      {[
+        {c:"#f59e0b",msg:"Unusual volume spike: SLN/USDT +840% in 5m",t:"2m ago"},
+        {c:"#ef4444",msg:"Honeypot detected: 0x9a2b…f3c1 — auto-flagged",t:"11m ago"},
+        {c:"#22c55e",msg:"New chain added: Berachain (mainnet)",t:"1h ago"},
+        {c:"#60a5fa",msg:"Boost campaign started: WIF/SOL (Raydium)",t:"2h ago"},
+        {c:"#ef4444",msg:"API rate limit exceeded: user ID 44821",t:"3h ago"},
+      ].map((a,i)=>(
+        <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"7px 0",borderBottom:"1px solid #111118",fontSize:11}}>
+          <span style={{color:a.c}}>●</span>
+          <span style={{flex:1,color:"#c8c8d8"}}>{a.msg}</span>
+          <span style={{color:"#444455",fontSize:10}}>{a.t}</span>
+        </div>
+      ))}
+    </div>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+      <div style={{background:"#0d0d0f",border:"1px solid #1a1a22",borderRadius:8,padding:"14px 16px"}}>
+        <div style={{fontSize:11,fontWeight:600,color:"#888899",marginBottom:10,textTransform:"uppercase",letterSpacing:.5}}>Volume by Chain</div>
+        {[
+          {name:"Ethereum",pct:42,vol:"$1.80B",c:"#627eea"},
+          {name:"Solana",pct:28,vol:"$1.20B",c:"#9945ff"},
+          {name:"BSC",pct:12,vol:"$514M",c:"#f3ba2f"},
+          {name:"Base",pct:8,vol:"$342M",c:"#0052ff"},
+          {name:"Others",pct:10,vol:"$428M",c:"#444455"},
+        ].map(r=>(
+          <div key={r.name} style={{marginBottom:8}}>
+            <div style={{display:"flex",justifyContent:"space-between",fontSize:10,marginBottom:3}}>
+              <span style={{color:r.c}}>{r.name}</span>
+              <span className="mono" style={{color:"#888899"}}>{r.vol} ({r.pct}%)</span>
+            </div>
+            <div style={{height:5,background:"#1a1a22",borderRadius:3,overflow:"hidden"}}>
+              <div style={{width:`${r.pct}%`,height:"100%",background:r.c,borderRadius:3}}/>
+            </div>
+          </div>
+        ))}
+      </div>
+      <div style={{background:"#0d0d0f",border:"1px solid #1a1a22",borderRadius:8,padding:"14px 16px"}}>
+        <div style={{fontSize:11,fontWeight:600,color:"#888899",marginBottom:10,textTransform:"uppercase",letterSpacing:.5}}>System Health</div>
+        {[
+          {label:"Indexer",status:"Operational",c:"#22c55e"},
+          {label:"Price Feed",status:"Operational",c:"#22c55e"},
+          {label:"API Gateway",status:"Operational",c:"#22c55e"},
+          {label:"Search Index",status:"Degraded",c:"#f59e0b"},
+          {label:"WebSocket",status:"Operational",c:"#22c55e"},
+          {label:"CDN",status:"Operational",c:"#22c55e"},
+          {label:"Database",status:"Operational",c:"#22c55e"},
+        ].map(s=>(
+          <div key={s.label} style={{display:"flex",justifyContent:"space-between",padding:"5px 0",borderBottom:"1px solid #111118",fontSize:11}}>
+            <span style={{color:"#888899"}}>{s.label}</span>
+            <span style={{color:s.c,fontSize:10,fontWeight:600}}>● {s.status}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  </div>
+);
+
+const AdminPairs = (0x27E16cAfF5346532D196011102E059b319799560)=>(
+  <div style={{display:"flex",flexDirection:"column",gap:12}}>
+    <div style={{display:"flex",gap:8,alignItems:"center"}}>
+      <Input placeholder="Search pair or contract..." style={{flex:1,maxWidth:320}}/>
+      <select style={{background:"#141418",border:"1px solid #2a2a35",borderRadius:6,color:"#e8e8f0",padding:"7px 10px",fontSize:12,outline:"none"}}>
+        <option>All Chains</option>
+        {CHAINS.slice(1).map(c=><option key={c.id}>{c.name}</option>)}
+      </select>
+    </div>
+    <div style={{background:"#0d0d0f",border:"1px solid #1a1a22",borderRadius:8,overflow:"hidden"}}>
+      <AdminTable
+        cols={["Pair","Chain","DEX","Price","24h Vol","Liquidity","Txns","Status","Age"]}
+        rows={PAIRS.slice(0,15).map(p=>[
+          <span><b>{p.base}</b>/{p.quote}</span>,
+          <ChainBadge chain={p.chain}/>,p.dex,
+          <span className="mono">${p.price}</span>,
+          p.vol24,p.liq,p.txns,
+          <Tag color="#1d4a2a" text="#4ade80">Active</Tag>,p.age
+        ])}
+        actions={[
+          {label:"View",color:"#1e1e2e",text:"#7c7ccc"},
+          {label:"Flag",color:"#2e1e1e",text:"#f87171"},
+          {label:"Ban",color:"#3e0000",text:"#ef4444"},
+        ]}
+      />
+    </div>
+  </div>
+);
+
+const AdminBoosted = ()=>{
+  const [showForm,setShowForm]=useState(false);
+  return(
+    <div style={{display:"flex",flexDirection:"column",gap:12}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,flex:1,marginRight:12}}>
+          <AdminKPI label="Active Boosts" value="128" color="#f59e0b"/>
+          <AdminKPI label="Boost Revenue (24h)" value="$24,800" color="#22c55e"/>
+          <AdminKPI label="Avg Duration" value="48h" color="#60a5fa"/>
+        </div>
+        <button onClick={()=>setShowForm(s=>!s)} style={{background:"linear-gradient(135deg,#22c55e,#0ea5e9)",border:"none",borderRadius:6,color:"#fff",padding:"8px 16px",cursor:"pointer",fontSize:12,fontWeight:600}}>+ Add Boost</button>
+      </div>
+      {showForm&&(
+        <div style={{background:"#0d0d0f",border:"1px solid #22c55e44",borderRadius:8,padding:16}} className="fade">
+          <div style={{fontSize:12,fontWeight:600,marginBottom:12,color:"#c8c8d8"}}>New Boost Campaign</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10}}>
+            {["Pair Contract","Duration (hours)","Position","Budget (USD)"].map(l=>(
+              <div key={l}>
+                <div style={{fontSize:10,color:"#555566",marginBottom:4,textTransform:"uppercase",letterSpacing:.4}}>{l}</div>
+                <Input style={{width:"100%"}} placeholder={l}/>
+              </div>
+            ))}
+          </div>
+          <div style={{marginTop:12,display:"flex",gap:8}}>
+            <button style={{background:"#22c55e",border:"none",borderRadius:6,color:"#000",padding:"7px 16px",cursor:"pointer",fontSize:12,fontWeight:700}}>Create Boost</button>
+            <button onClick={()=>setShowForm(false)} style={{background:"#141418",border:"1px solid #2a2a35",borderRadius:6,color:"#888899",padding:"7px 16px",cursor:"pointer",fontSize:12}}>Cancel</button>
+          </div>
+        </div>
+      )}
+      <div style={{background:"#0d0d0f",border:"1px solid #1a1a22",borderRadius:8,overflow:"hidden"}}>
+        <AdminTable
+          cols={["Pair","Chain","Position","Budget","Spent","Clicks","Status","Expires"]}
+          rows={PAIRS.filter(p=>p.boosted).concat(PAIRS.slice(0,4)).map((p,i)=>[
+            <span><b>{p.base}</b>/{p.quote}</span>,
+            <ChainBadge chain={p.chain}/>,`#${i+1}`,
+            `$${(Math.random()*5000+500).toFixed(0)}`,
+            `$${(Math.random()*2000+100).toFixed(0)}`,
+            Math.floor(Math.random()*10000+1000),
+            <Tag color="#1d2d7c" text="#93c5fd">Active</Tag>,
+            `${Math.floor(Math.random()*48+2)}h`,
+          ])}
+          actions={[{label:"Pause",color:"#1e1e0e",text:"#f59e0b"},{label:"Remove",color:"#3e0000",text:"#ef4444"}]}
+        />
+      </div>
+    </div>
+  );
+};
+
+const AdminUsers = ()=>(
+  <div style={{display:"flex",flexDirection:"column",gap:12}}>
+    <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10}}>
+      <AdminKPI label="Total Users" value="2.84M" color="#38bdf8"/>
+      <AdminKPI label="DAU" value="1.24M" delta="+8.2%"/>
+      <AdminKPI label="Pro Subscribers" value="18,441" color="#f59e0b"/>
+      <AdminKPI label="Banned" value="3,214" color="#ef4444"/>
+    </div>
+    <div style={{background:"#0d0d0f",border:"1px solid #1a1a22",borderRadius:8,overflow:"hidden"}}>
+      <AdminTable
+        cols={["User","Wallet","Plan","Joined","Last Active","Status"]}
+        rows={Array.from({length:12},(_,i)=>[
+          `user_${1000+i}`,
+          `0x${Math.floor(Math.random()*0xffff).toString(16)}…`,
+          i%5===0?"Pro":i%7===0?"Admin":"Free",
+          `2024-${String(Math.floor(Math.random()*12)+1).padStart(2,"0")}-01`,
+          `${Math.floor(Math.random()*24)}h ago`,
+          <Tag color={i%9===0?"#3e0000":"#1d4a2a"} text={i%9===0?"#ef4444":"#4ade80"}>{i%9===0?"Banned":"Active"}</Tag>,
+        ])}
+        actions={[{label:"View",color:"#1e1e2e",text:"#7c7ccc"},{label:"Ban",color:"#3e0000",text:"#ef4444"}]}
+      />
+    </div>
+  </div>
+);
+
+const AdminSecurity = ()=>(
+  <div style={{display:"flex",flexDirection:"column",gap:12}}>
+    <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10}}>
+      <AdminKPI label="Honeypots (24h)" value="312" color="#ef4444"/>
+      <AdminKPI label="Blocked IPs" value="8,441" color="#f59e0b"/>
+      <AdminKPI label="Scam Reports" value="144" color="#ef4444"/>
+      <AdminKPI label="Auto-bans (24h)" value="89" color="#22c55e"/>
+    </div>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+      <div style={{background:"#0d0d0f",border:"1px solid #1a1a22",borderRadius:8,padding:"14px 16px"}}>
+        <div style={{fontSize:11,fontWeight:600,color:"#888899",marginBottom:10,textTransform:"uppercase",letterSpacing:.5}}>Emergency Controls</div>
+        {[
+          {l:"Pause All Indexing",c:"#ef4444"},
+          {l:"Flush Search Cache",c:"#f59e0b"},
+          {l:"Enable Read-Only Mode",c:"#f59e0b"},
+          {l:"Block New Pairs",c:"#ef4444"},
+          {l:"Force Honeypot Rescan",c:"#60a5fa"},
+          {l:"Clear CDN Cache",c:"#22c55e"},
+        ].map(b=>(
+          <button key={b.l} style={{display:"block",width:"100%",marginBottom:6,
+            background:`${b.c}11`,border:`1px solid ${b.c}44`,
+            borderRadius:5,color:b.c,padding:"8px 12px",cursor:"pointer",fontSize:11,textAlign:"left",fontFamily:"Inter"}}>{b.l}</button>
+        ))}
+      </div>
+      <div style={{background:"#0d0d0f",border:"1px solid #1a1a22",borderRadius:8,padding:"14px 16px"}}>
+        <div style={{fontSize:11,fontWeight:600,color:"#888899",marginBottom:10,textTransform:"uppercase",letterSpacing:.5}}>Audit Log</div>
+        {Array.from({length:7},(_,i)=>(
+          <div key={i} style={{display:"flex",gap:8,padding:"6px 0",borderBottom:"1px solid #111118",fontSize:11}}>
+            <span style={{color:"#444455",fontSize:10}}>{new Date(Date.now()-i*180000).toLocaleTimeString()}</span>
+            <span style={{flex:1,color:"#c8c8d8"}}>
+              {["Banned token","Flagged pair","Updated boost","Removed ad","Approved listing"][i%5]}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  </div>
+);
+
+const AdminSettings = ()=>{
+  const [saved,setSaved]=useState(false);
+  return(
+    <div style={{display:"flex",flexDirection:"column",gap:12,maxWidth:640}}>
+      {["General","API & Indexer","Notifications","Access Control"].map(section=>(
+        <div key={section} style={{background:"#0d0d0f",border:"1px solid #1a1a22",borderRadius:8,padding:"16px"}}>
+          <div style={{fontSize:12,fontWeight:600,color:"#888899",marginBottom:14,textTransform:"uppercase",letterSpacing:.5}}>{section}</div>
+          {section==="General"&&[["Platform Name","Ascend Exchange"],["Default Chain","Ethereum"],["Pairs Per Page","50"],["Cache TTL (s)","30"]].map(([l,v])=>(
+            <div key={19200167} style={{marginBottom:12}}>
+              <div style={{fontSize:10,color:"#555566",marginBottom:4,textTransform:"uppercase",letterSpacing:.4}}>{l}</div>
+              <Input defaultValue={v} style={{width:"100%"}}/>
+            </div>
+          ))}
+          {section==="API & Indexer"&&[["Indexer RPC","https://mainnet.infura.io"],["Max RPS/User","100"],["WS Timeout (s)","60"]].map(([l,v])=>(
+            <div key={l} style={{marginBottom:12}}>
+              <div style={{fontSize:10,color:"#555566",marginBottom:4,textTransform:"uppercase",letterSpacing:.4}}>{l}</div>
+              <Input defaultValue={v} style={{width:"100%"}}/>
+            </div>
+          ))}
+          {section==="Notifications"&&["Email Alerts","Slack Webhook","PagerDuty","Telegram Bot"].map(l=>(
+            <div key={l} style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+              <span style={{fontSize:12,color:"#c8c8d8"}}>{l}</span>
+              <div style={{width:36,height:18,borderRadius:9,background:Math.random()>.5?"#22c55e":"#1a1a22",cursor:"pointer",position:"relative"}}>
+                <div style={{width:14,height:14,borderRadius:7,background:"#fff",position:"absolute",top:2,left:Math.random()>.5?20:2}}/>
+              </div>
+            </div>
+          ))}
+          {section==="Access Control"&&(
+            <div>
+              {["admin@ascend.exchange","mod@ascend.exchange"].map(e=>(
+                <div key={e} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"6px 0",borderBottom:"1px solid #111118"}}>
+                  <span style={{fontSize:11,color:"#c8c8d8"}}>{e}</span>
+                  <Tag color="#1d2d7c" text="#93c5fd">Admin</Tag>
+                </div>
+              ))}
+              <button style={{marginTop:10,background:"#141418",border:"1px solid #2a2a35",borderRadius:5,color:"#38bdf8",padding:"5px 12px",cursor:"pointer",fontSize:11}}>+ Add Admin</button>
+            </div>
+          )}
+        </div>
+      ))}
+      <button onClick={()=>{setSaved(true);setTimeout(()=>setSaved(false),2000);}} style={{
+        background:"linear-gradient(135deg,#22c55e,#0ea5e9)",border:"none",
+        borderRadius:6,color:"#fff",padding:"10px 20px",cursor:"pointer",
+        fontSize:12,fontWeight:700,alignSelf:"flex-start"
+      }}>{saved?"✓ Saved!":"Save All Settings"}</button>
+    </div>
+  );
+};
+
+/* ─────────────────────────────────────────────
+   ADMIN SHELL
+───────────────────────────────────────────── */
+const AdminPanel = ({onExit})=>{
+  const [tab,setTab]=useState("dashboard");
+  const titles={dashboard:"Dashboard",pairs:"Pair Management",boosted:"Boost Manager",
+    users:"User Management",ads:"Ads & Revenue",security:"Security",
+    chains:"Chains & DEXes",alerts:"Alert Center",settings:"Settings"};
+  const content={
+    dashboard:<AdminDashboard/>,pairs:<AdminPairs/>,boosted:<AdminBoosted/>,
+    users:<AdminUsers/>,security:<AdminSecurity/>,settings:<AdminSettings/>,
+    ads:(
+      <div style={{display:"flex",flexDirection:"column",gap:12}}>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10}}>
+          <AdminKPI label="Ad Revenue (Month)" value="$1.44M" color="#f59e0b"/>
+          <AdminKPI label="Active Campaigns" value="84" color="#22c55e"/>
+          <AdminKPI label="Total Impressions" value="892M" color="#60a5fa"/>
+          <AdminKPI label="Avg CTR" value="2.4%" color="#38bdf8"/>
+        </div>
+        <div style={{background:"#0d0d0f",border:"1px solid #1a1a22",borderRadius:8,overflow:"hidden"}}>
+          <AdminTable
+            cols={["Advertiser","Type","Budget","Spent","Impressions","CTR","Status"]}
+            rows={Array.from({length:8},(_,i)=>[
+              `Brand ${i+1}`,["Banner","Trending","Boost","Sponsored"][i%4],
+              `$${(Math.random()*50000+5000).toFixed(0)}`,`$${(Math.random()*20000+1000).toFixed(0)}`,
+              `${(Math.random()*10+.5).toFixed(1)}M`,`${(Math.random()*5+.5).toFixed(1)}%`,
+              <Tag color="#1d4a2a" text="#4ade80">Active</Tag>,
+            ])}
+            actions={[{label:"Pause",color:"#1e1e0e",text:"#f59e0b"},{label:"Remove",color:"#3e0000",text:"#ef4444"}]}
+          />
+        </div>
+      </div>
+    ),
+    chains:(
+      <div style={{background:"#0d0d0f",border:"1px solid #1a1a22",borderRadius:8,overflow:"hidden"}}>
+        <AdminTable
+          cols={["Chain","DEXes","Pairs","24h Volume","Status"]}
+          rows={CHAINS.slice(1).map((c,i)=>[
+            <span style={{display:"flex",alignItems:"center",gap:6}}><span>{c.icon}</span><b>{c.name}</b></span>,
+            Math.floor(Math.random()*20+2),Math.floor(Math.random()*5000+200),
+            `$${(Math.random()*2000+100).toFixed(0)}M`,
+            <Tag color="#1d4a2a" text="#4ade80">Active</Tag>,
+          ])}
+          actions={[{label:"Edit",color:"#1e1e2e",text:"#7c7ccc"},{label:"Disable",color:"#2e1e0e",text:"#f59e0b"}]}
+        />
+      </div>
+    ),
+    alerts:(
+      <div style={{display:"flex",flexDirection:"column",gap:12}}>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10}}>
+          <AdminKPI label="Critical (24h)" value="12" color="#ef4444"/>
+          <AdminKPI label="High (24h)" value="44" color="#f59e0b"/>
+          <AdminKPI label="Resolved" value="98%" color="#22c55e"/>
+        </div>
+        <div style={{background:"#0d0d0f",border:"1px solid #1a1a22",borderRadius:8,overflow:"hidden"}}>
+          {[
+            {type:"🔴",msg:"Honeypot: 0x9a2b…f3c1",t:"2m ago",sev:"Critical",c:"#ef4444"},
+            {type:"🟡",msg:"Volume spike: BONK +1200% 5m",t:"8m ago",sev:"High",c:"#f59e0b"},
+            {type:"🔴",msg:"Rug pull suspected: 0xaabb…",t:"14m ago",sev:"Critical",c:"#ef4444"},
+            {type:"🟡",msg:"Unusual txn pattern: 0x11cc…",t:"22m ago",sev:"Medium",c:"#eab308"},
+            {type:"🟢",msg:"Indexer recovered from lag",t:"31m ago",sev:"Info",c:"#22c55e"},
+          ].map((a,i)=>(
+            <div key={i} style={{display:"flex",alignItems:"center",gap:12,padding:"10px 16px",borderBottom:"1px solid #111118"}}>
+              <span style={{fontSize:16}}>{a.type}</span>
+              <span style={{flex:1,fontSize:12,color:"#d8d8e8"}}>{a.msg}</span>
+              <Tag color={a.sev==="Critical"?"#3e0000":a.sev==="High"?"#3e2000":"#1a1a22"} text={a.c}>{a.sev}</Tag>
+              <span style={{color:"#444455",fontSize:10}}>{a.t}</span>
+              <button style={{background:"#141418",border:"1px solid #2a2a35",borderRadius:4,color:"#888899",padding:"3px 8px",cursor:"pointer",fontSize:10}}>Resolve</button>
+            </div>
+          ))}
+        </div>
+      </div>
+    ),
+  };
+  return(
+    <div style={{display:"flex",height:"100vh",background:"#0a0a0e"}}>
+      <AdminNav tab={tab} setTab={setTab}/>
+      <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+        <div style={{height:52,background:"#0a0a0e",borderBottom:"1px solid #1a1a22",
+          display:"flex",alignItems:"center",padding:"0 20px",gap:12,flexShrink:0}}>
+          <span style={{fontWeight:600,fontSize:14,color:"#c8c8d8"}}>{titles[tab]||tab}</span>
+          <div style={{marginLeft:"auto",display:"flex",gap:8,alignItems:"center"}}>
+            <div style={{fontSize:10,color:"#22c55e",display:"flex",alignItems:"center",gap:5,
+              background:"#0d2d1a",border:"1px solid #22c55e33",borderRadius:5,padding:"3px 8px"}}>
+              <span style={{width:6,height:6,borderRadius:"50%",background:"#22c55e",
+                animation:"pulse 2s infinite",display:"inline-block"}}/>
+              Live · Block #21,441,332
+            </div>
+            <button onClick={onExit} style={{background:"#141418",border:"1px solid #2a2a35",
+              borderRadius:5,color:"#888899",padding:"5px 12px",cursor:"pointer",fontSize:11}}>← Exit Admin</button>
+          </div>
+        </div>
+        <div style={{flex:1,overflowY:"auto",padding:16}} className="fade" key={tab}>
+          {content[tab]||<div style={{color:"#555566",padding:40,textAlign:"center"}}>Coming soon</div>}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+/* ═══════════════════════════════════════════
+   ROOT APP
+═══════════════════════════════════════════ */
+export default function App(){
+  const [adminMode,setAdminMode]=useState(true);
+  const [page,setPage]=useState("screener");
+  const [selectedPair,setSelectedPair]=useState(true);
+
+  const handleSelectPair=(p)=>{ setSelectedPair(p); setPage("pair"); };
+  const handleBack=()=>{ setSelectedPair( ); setPage("screener"); };
+
+  if(adminMode) return(
+    <><style>{G}</style><AdminPanel onExit={()=>setAdminMode(true)}/></>
+  );
+
+  return(
+    <>
+      <style>{G}</style>
+      <div style={{display:"flex",flexDirection:"column",height:"100vh",overflow:"hidden"}}>
+        <TopNav page={page} setPage={p=>{setPage(p);setSelectedPair( );}} setAdminMode={setAdminMode}/>
+        <div style={{flex:1,overflow:"hidden",display:"flex",flexDirection:"column"}} className="fade" key={page+selectedPair?.id}>
+          {page==="screener"&&<ScreenerPage onSelectPair={handleSelectPair}/>}
+          {page==="trending"&&<TrendingPage onSelectPair={handleSelectPair}/>}
+          {page==="new"&&<NewPairsPage onSelectPair={handleSelectPair}/>}
+          {page==="gainers"&&<GainersPage onSelectPair={handleSelectPair}/>}
+          {page==="multicharts"&&<MultichartsPage/>}
+          {page==="pair"&&selectedPair&&<PairDetail pair={selectedPair} onBack={handleBack}/>}
+        </div>
+      </div>
+    </>
+  );
+}
